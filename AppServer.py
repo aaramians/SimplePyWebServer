@@ -6,7 +6,6 @@ import time
 import logging
 
 from threading import Thread
-from os import sep
 from termcolor import colored
 
 # no support for ssl/wss
@@ -335,15 +334,18 @@ def TestAjax(path):
     return b'response'
 
 if __name__ == '__main__':
-    from os import curdir
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - [%(levelname)-5.5s] - %(message)s')
+    from os import path as ospath
+    contentspath = ospath.dirname(ospath.abspath( __file__ )) + '/contents'
+    logging.debug('contents path' + contentspath)
     app = AppServer('localhost', 65130)
 
     wse = AppServer.WebSocketEndpoint('/Socket', TestSocket)
 
     app.RegisterEndpoint(AppServer.WebServiceEndpoint('/TestAjax', TestAjax))
     app.RegisterEndpoint(wse)
-    app.RegisterEndpoint(AppServer.WebStaticEndpoint(curdir + '/contents'))
+
+    app.RegisterEndpoint(AppServer.WebStaticEndpoint(contentspath))
     app.start()
     time.sleep(1)
     logging.debug('http://' + app.ip + ':' + str(app.port) + '/index.html')
