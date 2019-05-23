@@ -9,7 +9,7 @@
 
          if ("WebSocket" in window) {
             // Let us open a web socket
-            ws = new WebSocket("ws://localhost:" + location.port + "/echo");
+            ws = new WebSocket("ws://" + location.host + "/Socket");
 
             ws.onopen = function () {
 
@@ -37,8 +37,8 @@
 
          $.ajax({
             type: "POST",
-            url: 'Test1',
-            data: { name: "John", time: "2pm" } ,
+            url: 'TestAjax',
+            data: { path: "." } ,
             success: function(d){
                console.log(d)
             },
