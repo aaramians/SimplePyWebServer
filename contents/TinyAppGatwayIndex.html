@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+   <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.0/jquery.min.js"></script>
+   <script type="text/javascript">
+      var ws = null
+      var i = 0;
+      function WebSocketTest() {
+
+         // The browser doesn't support WebSocket
+         if ("WebSocket" in window)
+            if (ws === null) {
+               // Let us open a web socket
+               ws = new WebSocket("ws://" + location.host + "/Socket");
+
+               ws.onopen = function () {
+                  console.log("Socket is open...");
+
+               };
+
+               ws.onmessage = function (evt) {
+                  var received_msg = evt.data;
+                  console.log(evt);
+                  progress(evt.data);
+               };
+
+               ws.onclose = function () {
+                  // websocket is closed.
+                  console.log("Connection is closed...");
+
+               };
+            }
+            else {
+               i = i + 1;
+               // Web Socket is connected, send data using send()
+               ws.send(i);
+            }
+         else {
+
+            alert("WebSocket NOT supported by your Browser!");
+         }
+
+      }
+      function AjaxTest() {
+         //document.getElementById('div-video').innerHTML = '<video width="400" controls><source src="movie.mp4" type="video/mp4">Your browser does not support HTML5 video.</video>';
+
+         // http://api.jquery.com/jquery.ajax/ see for more details
+         // For cross-domain requests, setting the content type to anything other than application/x-www-form-urlencoded, multipart/form-data, or text/plain will trigger the browser to send a preflight OPTIONS request to the server.
+         // Ajax requests are sent using the GET HTTP method, post is UTF-8 charset
+         // if dictonary; jQuery.param() is used
+         // converters (default: {"* text": window.String, "text html": true, "text json": jQuery.parseJSON, "text xml": jQuery.parseXML})
+         // dataType (default: Intelligent Guess (xml, json, script, or html))
+         $.ajax({
+            type: "POST",
+            url: 'TestAjax',
+            data: { param1: "param1", param2: "param2", param3: "param3" },
+            success: function (d) {
+               alert(d)
+            },
+         });
+      }
+
+      var RADIUS = 54;
+      var CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+
+      function progress(value) {
+         var progress = value / 100;
+         var dashoffset = CIRCUMFERENCE * (1 - progress);
+         progressValue.style.strokeDashoffset = dashoffset;
+      }
+      var progressValue;
+
+      $(document).ready(function () {
+         progressValue = document.getElementById('progX');
+         progressValue.style.strokeDasharray = CIRCUMFERENCE;
+         progress(1);
+      });
+
+   </script>
+   <style>
+   </style>
+</head>
+
+<body>
+
+   <h2>This is a heading</h2>
+
+   <p>This is a paragraph.</p>
+   <p>This is another paragraph.</p>
+   <div id="div-video"></div>
+   <div class="demo">
+      <svg class="progress" width="120" height="120">
+         <circle cx="60" cy="60" r="54" stroke-width="12" style="stroke:#e6e6e6;fill: none" />
+         <circle id="progX" cx="60" cy="60" r="54" stroke-width="12"
+            style="stroke:#20b8ff;stroke-linecap:round;fill: none" />
+      </svg>
+   </div>
+
+   <button onclick="WebSocketTest();">Web Socket Test</button>
+   <button onclick="AjaxTest();">Ajax Test</button>
+
+</body>
+
+</html>
