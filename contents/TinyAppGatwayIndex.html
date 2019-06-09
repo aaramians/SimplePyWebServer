@@ -6,13 +6,28 @@
    <script type="text/javascript">
       var ws = null
       var i = 0;
+
+      function ServerEventSourceTest() {
+         if (typeof (EventSource) !== "undefined") {
+            var source = new EventSource("TestSSE");
+            source.addEventListener('message', function (event) {
+               document.getElementById("result").innerHTML += event.data + "<br>";
+            });
+            source.addEventListener('customevent', function (event) {
+               document.getElementById("result").innerHTML += event.data + "<br>";
+            });
+         } else {
+            alert("EventSource NOT supported by your Browser!");
+         }
+      }
+
       function WebSocketTest() {
 
          // The browser doesn't support WebSocket
-         if ("WebSocket" in window)
+         if (typeof (EventSource) !== "undefined")
             if (ws === null) {
                // Let us open a web socket
-               ws = new WebSocket("ws://" + location.host + "/Socket");
+               ws = new WebSocket("ws://" + location.host + "/TestSocket");
 
                ws.onopen = function () {
                   console.log("Socket is open...");
@@ -48,9 +63,10 @@
          // http://api.jquery.com/jquery.ajax/ see for more details
          // For cross-domain requests, setting the content type to anything other than application/x-www-form-urlencoded, multipart/form-data, or text/plain will trigger the browser to send a preflight OPTIONS request to the server.
          // Ajax requests are sent using the GET HTTP method, post is UTF-8 charset
-         // if dictonary; jQuery.param() is used
+         // if dictionary; jQuery.param() is used
          // converters (default: {"* text": window.String, "text html": true, "text json": jQuery.parseJSON, "text xml": jQuery.parseXML})
          // dataType (default: Intelligent Guess (xml, json, script, or html))
+
          $.ajax({
             type: "POST",
             url: 'TestAjax',
@@ -89,6 +105,23 @@
    <p>This is a paragraph.</p>
    <p>This is another paragraph.</p>
    <div id="div-video"></div>
+
+   <div>
+      <p>This is multipart/form-data.</p>
+      <form method="post" enctype="multipart/form-data">
+         <input type="file" name="fileToUpload" id="fileToUpload">
+         <input type="submit" value="Upload Image" name="submit">
+      </form>
+   </div>
+
+   <div>
+      <p>This is application/x-www-form-urlencoded.</p>
+      <form method="post" enctype="application/x-www-form-urlencoded">
+         <input type="file" name="fileToUpload" id="fileToUpload">
+         <input type="submit" value="Upload Image" name="submit">
+      </form>
+   </div>
+
    <div class="demo">
       <svg class="progress" width="120" height="120">
          <circle cx="60" cy="60" r="54" stroke-width="12" style="stroke:#e6e6e6;fill: none" />
@@ -96,7 +129,9 @@
             style="stroke:#20b8ff;stroke-linecap:round;fill: none" />
       </svg>
    </div>
+   <div id="result"></div>
 
+   <button onclick="ServerEventSourceTest();">Server Event Source Test</button>
    <button onclick="WebSocketTest();">Web Socket Test</button>
    <button onclick="AjaxTest();">Ajax Test</button>
 
