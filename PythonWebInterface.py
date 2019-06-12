@@ -1,16 +1,19 @@
-import socket
-import hashlib
-import mimetypes
-import base64
-import time
-import logging
-import sys
-from threading import Thread
+#!/usr/bin/env python3
 
 
 # no support for ssl/wss
-# no limit on file service
+# not scalable
+# uses ineff. thread to handle
+# no limit on file service/danger
 
+# Other - SSL:
+# openssl genrsa -des3 -out server.orig.key 2048
+# openssl rsa -in server.orig.key -out server.key
+# openssl req -new -key server.key -out server.csr
+# openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
+# openssl req -new -x509 -days 365 -nodes -out cert.pem -keyout cert.pem
+
+# Other - Links:
 # https://github.com/enthought/Python-2.7.3/blob/master/Lib/SimpleHTTPServer.py
 # https://github.com/enthought/Python-2.7.3/blob/master/Lib/SimpleHTTPServer.py
 # https://blog.anvileight.com/posts/simple-python-http-server/
@@ -20,6 +23,14 @@ from threading import Thread
 # https://www.acmesystems.it/python_http
 # https://github.com/pikhovkin/simple-websocket-server/blob/master/simple_websocket_server/__init__.py
 
+import socket
+import hashlib
+import base64
+import time
+import logging
+import sys
+import ssl
+from threading import Thread
 
 if sys.version_info[0] < 3:
     raise Exception("Must be using Python 3")
@@ -94,14 +105,13 @@ __responses = {
 #     def __init__(self, file):
 #         pass
 
-
-class TinyAppGateway(Thread):
+class PythonWebInterface(Thread):
     # every connection is handled with a thread, may not scale well, but very easy to deal with
     class ServiceHandlerThread(Thread):
-        def __init__(self, socket, caddress, server):
+        def __init__(self, socket, address, server):
             Thread.__init__(self)
             self.socket = socket
-            self.caddress = caddress
+            self.address = address
             self.path = None
             self.server = server
             self.daemon = True
@@ -112,7 +122,7 @@ class TinyAppGateway(Thread):
             # just about enough to understand the content
             request = self.socket.recv(4 * 1024)
 
-            # primary headers
+            # primary headers extraction
             n_index = 0
             parse = True
             request_Content_Length = None
@@ -155,6 +165,7 @@ class TinyAppGateway(Thread):
 
             self.command, self.route, self.version = None, None, None
 
+            # extracting verb, route, version
             if len(self.headers) > 0:
                 logging.info(self.headers[0])
                 words = self.headers[0].split()
@@ -192,7 +203,7 @@ class TinyAppGateway(Thread):
             self.route = route
             self.callback = callback
 
-        def Respond(self, sckthread):
+        def Respond(self, sockth):
             pass
 
     class WebStaticEndpoint(Endpoint):
@@ -201,37 +212,66 @@ class TinyAppGateway(Thread):
             self.path = path
             logging.info('content path : ' + self.path)
 
-        def Respond(self, sckthread):
-            with open(self.path + sckthread.route, 'rb') as f:
-                content = f.read(16*1024*1024)
-                contentlen = len(content)
-            
+        def Respond(self, sockth):
+            try:
+                with open(self.path + sockth.route, 'rb') as f:
+                    content = f.read(16*1024*1024)
+                    contentlen = len(content)
+                    
+            except FileNotFoundError:
+                sockth.socket.send(b'HTTP/1.1 404 Not Found\r\n')
+                return
+                    
             if contentlen == 16*1024*1024:
                 raise NotImplementedError
                 
             mime = 'application/octet-stream'
-
-            if sckthread.route.endswith(".html"):
+            
+            # use import mimetypes if gets complicated
+            if sockth.route.endswith(".html"):
                 mime = 'text/html'
-            elif sckthread.route.endswith(".ico"):
+            elif sockth.route.endswith(".ico"):
                 mime = 'image/x-icon'
-            elif sckthread.route.endswith(".css"):
+            elif sockth.route.endswith(".css"):
                 mime = 'text/css'
-            elif sckthread.route.endswith(".jpg"):
+            elif sockth.route.endswith(".jpg"):
                 mime = 'image/jpeg'
-            elif sckthread.route.endswith(".js"):
+            elif sockth.route.endswith(".js"):
                 mime = 'application/javascript'
-            elif sckthread.route.endswith(".mp4"):
+            elif sockth.route.endswith(".mp4"):
                 mime = 'video/mp4'
 
-            sckthread.socket.send(b'HTTP/1.1 200 OK\r\n')
-            sckthread.socket.send(b'Content-Type: ' + bytes(mime, "ascii") + b'\r\n')
-            sckthread.socket.send(b'Content-Length: ' + bytes(str(contentlen), "ascii") + b'\r\n')
-            sckthread.socket.send(b'Connection: Closed\r\n')
-            sckthread.socket.send(b'\r\n')
-            sckthread.socket.send(content)
+            sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
+            sockth.socket.send(b'Content-Type: ' + bytes(mime, "ascii") + b'\r\n')
+            sockth.socket.send(b'Content-Length: ' + bytes(str(contentlen), "ascii") + b'\r\n')
+            sockth.socket.send(b'Connection: Closed\r\n')
+            sockth.socket.send(b'\r\n')
+            sockth.socket.send(content)
+    
+    class WebServiceEndpoint(Endpoint):
+        def __init__(self, route, callback):
+            self.route = route
+            self.callback = callback
+
+        def Respond(self, sockth):
+            self.OnReady(sockth)
+
+        def OnReady(self, sockth):
+            pl = sockth.request_form.decode('utf-8')
+            pl_parsed = dict(item.split("=") for item in pl.split("&"))
+            # urlparse.parse_qs("Name1=Value1;Name2=Value2;Name3=Value3")
+            method = self.callback
+            content = method(**pl_parsed)
+            contentlen = bytes(str(len(content)), "ascii")
+            sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
+            sockth.socket.send(b'Content-Length: ' + contentlen + b'\r\n')
+            sockth.socket.send(b'Connection: Closed\r\n')
+            sockth.socket.send(b'\r\n')
+            if content != None:
+                sockth.socket.send(content)
 
     # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+    # * IE, Edge Not supported
     # event: A string identifying the type of event described. If this is specified, an event will be dispatched on the browser to the listener for the specified event name;
     #       the website source code should use addEventListener() to listen for named events. The onmessage handler is called if no event name is specified for a message.
     # data: The data field for the message. When the EventSource receives multiple consecutive lines that begin with data:,
@@ -243,55 +283,33 @@ class TinyAppGateway(Thread):
         def __init__(self, route):
             super().__init__(route, None)
 
-        def Respond(self, sckthread):
-            sckthread.socket.send(b'HTTP/1.1 200 OK\r\n')
-            sckthread.socket.send(b'Content-Type: text/event-stream\r\n')
-            sckthread.socket.send(b'Cache-Control: no-cache\r\n')
-            sckthread.socket.send(b'\r\n')
-            self.OnReady(sckthread)
+        def Respond(self, sockth):
+            sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
+            sockth.socket.send(b'Content-Type: text/event-stream\r\n')
+            sockth.socket.send(b'Cache-Control: no-cache\r\n')
+            sockth.socket.send(b'\r\n')
+            self.OnReady(sockth)
 
-        def Send(self, sckthread, id, event, data, retry):
+        def Send(self, sockth, id, event, data, retry):
             if id:
-                sckthread.socket.send(b'id: ' + id + b'\r\n')
+                sockth.socket.send(b'id: ' + id + b'\r\n')
             if event:
-                sckthread.socket.send(b'event: ' + event + b'\r\n')
+                sockth.socket.send(b'event: ' + event + b'\r\n')
             if data:
-                sckthread.socket.send(b'data: ' + data + b'\r\n')
+                sockth.socket.send(b'data: ' + data + b'\r\n')
             if retry:
-                sckthread.socket.send(b'retry: ' + retry + b'\r\n')
+                sockth.socket.send(b'retry: ' + retry + b'\r\n')
 
-            sckthread.socket.send(b'\r\n')
+            sockth.socket.send(b'\r\n')
 
-        def OnReady(self, sckthread):
+        def OnReady(self, sockth):
             while 1:
-                self.Send(sckthread, None, None,
+                self.Send(sockth, None, None,
                           b'Server Side Event - onmessage', None)
                 time.sleep(1)
-                self.Send(sckthread, None, b'customevent',
+                self.Send(sockth, None, b'customevent',
                           b'Server Side Event - customevent', None)
                 time.sleep(1)
-
-    class WebServiceEndpoint(Endpoint):
-        def __init__(self, route, callback):
-            self.route = route
-            self.callback = callback
-
-        def Respond(self, sckthread):
-            self.OnReady(sckthread)
-
-        def OnReady(self, sckthread):
-            pl = sckthread.request_form.decode('utf-8')
-            pl_parsed = dict(item.split("=") for item in pl.split("&"))
-            # urlparse.parse_qs("Name1=Value1;Name2=Value2;Name3=Value3")
-            method = self.callback
-            content = method(**pl_parsed)
-            contentlen = bytes(str(len(content)), "ascii")
-            sckthread.socket.send(b'HTTP/1.1 200 OK\r\n')
-            sckthread.socket.send(b'Content-Length: ' + contentlen + b'\r\n')
-            sckthread.socket.send(b'Connection: Closed\r\n')
-            sckthread.socket.send(b'\r\n')
-            if content != None:
-                sckthread.socket.send(content)
 
     class WebSocketEndpoint(Endpoint):
         def __init__(self, route, onReady):
@@ -299,23 +317,23 @@ class TinyAppGateway(Thread):
             self.route = route
             self.onReady = onReady
 
-        def Respond(self, sckthread):
-            key = [s for s in sckthread.headers if "Sec-WebSocket-Key" in s]
+        def Respond(self, sockth):
+            key = [s for s in sockth.headers if "Sec-WebSocket-Key" in s]
             if len(key) == 1:
                 skey = key[0].split(':')[1].strip()
                 stoken = skey + self.__MAGICSTRING
                 stokensha1 = hashlib.sha1(stoken.encode('utf-8'))
                 secWebSocketAccept = base64.b64encode(stokensha1.digest())
-                sckthread.socket.send(b'HTTP/1.1 101 Switching Protocols\r\n')
-                sckthread.socket.send(b'Upgrade: websocket\r\n')
-                sckthread.socket.send(b'Connection: Upgrade\r\n')
-                sckthread.socket.send(b'Sec-WebSocket-Accept: ' + secWebSocketAccept + b'\r\n')
-                sckthread.socket.send(b'\r\n')
-            self.OnReady(sckthread)
+                sockth.socket.send(b'HTTP/1.1 101 Switching Protocols\r\n')
+                sockth.socket.send(b'Upgrade: websocket\r\n')
+                sockth.socket.send(b'Connection: Upgrade\r\n')
+                sockth.socket.send(b'Sec-WebSocket-Accept: ' + secWebSocketAccept + b'\r\n')
+                sockth.socket.send(b'\r\n')
+            self.OnReady(sockth)
 
-        def Receive(self, sckthread):
+        def Receive(self, sockth):
             # partial recv looks like wont happen, how ever multiple packets may need to be received and combined
-            request = sckthread.socket.recv(4096)
+            request = sockth.socket.recv(4096)
             fin = request[0] & 0x80 == 128
             opcode = request[0] & (0xF)
             Mask = request[1] & 0x80 == 128
@@ -358,7 +376,7 @@ class TinyAppGateway(Thread):
                 plLen = plLen - 1
             return payload
 
-        def Send(self, sckthread, payload):
+        def Send(self, sockth, payload):
             pllen = len(payload)
             plbytes = bytearray()
             b1, b2 = 0, 0
@@ -374,22 +392,23 @@ class TinyAppGateway(Thread):
             plbytes.append(b1)
             plbytes.append(b2)
             plbytes.extend(payload)
-            sckthread.socket.send(plbytes)
+            sockth.socket.send(plbytes)
 
-        def OnReady(self, sckthread):
+        def OnReady(self, sockth):
             while 1:
-                response = self.Receive(sckthread)
+                response = self.Receive(sockth)
                 if response != None:
-                    self.Send(sckthread, response)
+                    self.Send(sockth, response)
 
-    def __init__(self, hostname, port):
+    def __init__(self, hostname, port = 80, cert = None):
         Thread.__init__(self)
         self.endpoints = {}
         self.defaultendpoint = None
         self.hostname = hostname
         self.port = port
         self.daemon = True
-        self.running = False
+        self.listening = False
+        self.cert = cert
 
     def RegisterEndpoint(self, endpoint, default = False):
         logging.debug('registering endpoint ' + endpoint.route)
@@ -404,64 +423,78 @@ class TinyAppGateway(Thread):
         """
         properly kills the process: https://stackoverflow.com/a/16736227/4225229
         """
-        self.running = False
+        self.listening = False
         time.sleep(1)
+        # connect again to release the listener for terminating the connection
         t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         t.connect((self.hostname, self.port))
         t.close()
 
     def run(self):
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.bind((self.hostname, self.port))
-        self.server.listen(5)  # max backlog of connections
-        self.running = True
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as socksrvr:
+            socksrvr.bind((self.hostname, self.port))
+            socksrvr.listen(5)  # max backlog of connections
+            self.listening = True
 
-        logging.info('listening on ' + self.hostname + ':' + str(self.port))
+            logging.info('listening on ' + self.hostname + ':' + str(self.port))
 
-        while self.running:
-            try:
-                sck, addr = self.server.accept()
-                logging.debug('connect ' + ':'.join(str(x) for x in addr))
-                TinyAppGateway.ServiceHandlerThread(sck, addr, self).start()
-            except Exception as ex:
-                logging.critical(ex)
-                self.server.close()
-                break
+            while self.listening:
+                try:
+                    sockclint, addr = socksrvr.accept()
+                    
+                    if self.cert:
+                        sockclint = ssl.wrap_socket(sockclint, certfile = self.cert, server_side = True)
 
+                    logging.debug('connect ' + ':'.join(str(x) for x in addr))
+                    PythonWebInterface.ServiceHandlerThread(sockclint, addr, self).start()
+    
+                except Exception as ex:
+                    logging.critical(ex)
 
-def TestSocket(payload):
-    p = payload.decode("ascii")
-    logging.debug(p)
-    return bytes(p, "utf-8")
+                    if self.cert:
+                        # client rejects the certifcate?
+                        if ex.args[1].startswith('[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN]'):
+                            continue
 
+                        # a regular socket was connect to secure endpoint
+                        if ex.args[1].startswith('[SSL: HTTP_REQUEST]'):
+                            continue
 
-def TestAjax(param1, param2, param3):
-    logging.debug('%s %s %s ', param1, param2, param3)
-    return b'Ajax Response'
+                    socksrvr.close()
+                    break
 
 
 if __name__ == '__main__':
+    def TestSocket(payload):
+        p = payload.decode("ascii")
+        logging.debug(p)
+        return bytes(p, "utf-8")
+
+    def TestAjax(param1, param2, param3):
+        logging.debug('%s %s %s ', param1, param2, param3)
+        return b'Ajax Response'
+
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - [%(levelname)-5.5s] - %(message)s')
 
-    tag = TinyAppGateway('', 65150)
+    pwui = PythonWebInterface('', 65120)
 
-    tag.RegisterEndpoint(TinyAppGateway.WebServiceEndpoint('/TestAjax', TestAjax))
+    pwui.RegisterEndpoint(PythonWebInterface.WebServiceEndpoint('/TestAjax', TestAjax))
 
-    ws = tag.RegisterEndpoint(TinyAppGateway.WebSocketEndpoint('/TestSocket', TestSocket))
-
+    ws = pwui.RegisterEndpoint(PythonWebInterface.WebSocketEndpoint('/TestSocket', TestSocket))
     # ws.OnReady = TestCustomOnReady
-    sse = tag.RegisterEndpoint(TinyAppGateway.ServerSentEventEndpoint('/TestSSE'))
+    
+    sse = pwui.RegisterEndpoint(PythonWebInterface.ServerSentEventEndpoint('/TestSSE'))
 
     from os import path as ospath
-    wse = tag.RegisterEndpoint(TinyAppGateway.WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents'), True)
-    tag.start()
+    wse = pwui.RegisterEndpoint(PythonWebInterface.WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents'), True)
+    pwui.start()
 
-    logging.debug('http://localhost:' + str(tag.port) + '/TinyAppGatwayIndex.html')
+    logging.debug('http://localhost:' + str(pwui.port) + '/PythonWebInterface.html')
+    logging.info('Press Ctrl+C to terminate.')
 
     try:
-        logging.info('Press Ctrl+C to terminate.')
-        tag.join()
+        pwui.join()
     except KeyboardInterrupt:
         logging.debug('closing server')
-        tag.stop()
-        tag.join()
+        pwui.stop()
+        pwui.join()

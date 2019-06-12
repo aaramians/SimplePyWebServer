@@ -24,20 +24,24 @@
       function WebSocketTest() {
 
          // The browser doesn't support WebSocket
-         if (typeof (EventSource) !== "undefined")
+         if (typeof (EventSource) !== "undefined") {
             if (ws === null) {
                // Let us open a web socket
                ws = new WebSocket("ws://" + location.host + "/TestSocket");
 
                ws.onopen = function () {
                   console.log("Socket is open...");
+                  setTimeout(() => {
+                     // Web Socket is connected, send data using send()
+                     ws.send('Testing WebSocket');
+                  }, 1000);
 
                };
 
                ws.onmessage = function (evt) {
-                  var received_msg = evt.data;
                   console.log(evt);
-                  progress(evt.data);
+                  var received_msg = evt.data;
+                  document.getElementById("result").innerHTML += received_msg + "<br>";
                };
 
                ws.onclose = function () {
@@ -45,19 +49,16 @@
                   console.log("Connection is closed...");
 
                };
-            }
-            else {
-               i = i + 1;
-               // Web Socket is connected, send data using send()
-               ws.send(i);
-            }
-         else {
 
+            }
+         }
+         else {
             alert("WebSocket NOT supported by your Browser!");
          }
 
       }
       function AjaxTest() {
+
          //document.getElementById('div-video').innerHTML = '<video width="400" controls><source src="movie.mp4" type="video/mp4">Your browser does not support HTML5 video.</video>';
 
          // http://api.jquery.com/jquery.ajax/ see for more details
@@ -77,21 +78,10 @@
          });
       }
 
-      var RADIUS = 54;
-      var CIRCUMFERENCE = 2 * Math.PI * RADIUS;
-
-      function progress(value) {
-         var progress = value / 100;
-         var dashoffset = CIRCUMFERENCE * (1 - progress);
-         progressValue.style.strokeDashoffset = dashoffset;
+      function VideoTest() {
+         x = '<video width="400" controls><source src="https://www.w3schools.com/html/mov_bbb.mp4" type="video/mp4">Your browser does not support HTML5 video.</video>';
+         $('#result').html(x);
       }
-      var progressValue;
-
-      $(document).ready(function () {
-         progressValue = document.getElementById('progX');
-         progressValue.style.strokeDasharray = CIRCUMFERENCE;
-         progress(1);
-      });
 
    </script>
    <style>
@@ -117,23 +107,20 @@
    <div>
       <p>This is application/x-www-form-urlencoded.</p>
       <form method="post" enctype="application/x-www-form-urlencoded">
-         <input type="file" name="fileToUpload" id="fileToUpload">
-         <input type="submit" value="Upload Image" name="submit">
+         <input type="text" name="param1">
+         <input type="text" name="param2">
+         <input type="submit"/>
       </form>
    </div>
 
-   <div class="demo">
-      <svg class="progress" width="120" height="120">
-         <circle cx="60" cy="60" r="54" stroke-width="12" style="stroke:#e6e6e6;fill: none" />
-         <circle id="progX" cx="60" cy="60" r="54" stroke-width="12"
-            style="stroke:#20b8ff;stroke-linecap:round;fill: none" />
-      </svg>
-   </div>
+
    <div id="result"></div>
+
 
    <button onclick="ServerEventSourceTest();">Server Event Source Test</button>
    <button onclick="WebSocketTest();">Web Socket Test</button>
    <button onclick="AjaxTest();">Ajax Test</button>
+
 
 </body>
 
