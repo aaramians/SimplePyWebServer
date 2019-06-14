@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 # no support for ssl/wss
 # not scalable
 # uses ineff. thread to handle
@@ -30,6 +29,7 @@ import time
 import logging
 import sys
 import ssl
+import json
 from threading import Thread
 
 if sys.version_info[0] < 3:
@@ -101,10 +101,6 @@ __responses = {
     505: ('HTTP Version Not Supported', 'Cannot fulfill request.'),
 }
 
-# class FileTemplate(Template):
-#     def __init__(self, file):
-#         pass
-
 class PythonWebInterface(Thread):
     # every connection is handled with a thread, may not scale well, but very easy to deal with
     class ServiceHandlerThread(Thread):
@@ -117,58 +113,135 @@ class PythonWebInterface(Thread):
             self.daemon = True
 
         def ResolveEndpoint(self):
-            self.headers = []
+            self.requestlines = []
+            self.headers = {}
 
-            # just about enough to understand the content
+            # just about enough 4KiB to understand the request 
             request = self.socket.recv(4 * 1024)
 
-            # primary headers extraction
-            n_index = 0
-            parse = True
-            request_Content_Length = None
-            request_Content_Type = None
-            request_Content_Type_Charset = None
-            while len(request) > 0 and parse:
-                i = n_index
-                n_index = request.index(b'\r\n', n_index)
-                if i == n_index:
-                    parse = False
+            # primary request with headers extraction
+            lend = 0
+            lbegin = 0
+            while 1:
+                lbegin = lend
+                lend = request.index(b'\r\n', lend)
+                if lbegin == lend:
+                    lend = lend + len(b'\r\n')
+                    break
                 else:
-                    header = (request[i:n_index]).decode('ascii')
+                    header = (request[lbegin:lend]).decode('ascii')
+                    
+                    # todo prper header extraction
                     if header.startswith('Content-Length:'):
-                        request_Content_Length = int(header.split()[1])
+                        self.headers["Content-Length"] = int(header.split()[1])
 
-                    if header.startswith('Content-Type: application/x-www-form-urlencoded'):
-                        request_Content_Type = 'application/x-www-form-urlencoded'
-                        request_Content_Type_Charset = 'utf-8'
+                    elif header.startswith('Content-Type:'):
+                        for t in header.split():
+                            if t.startswith('application/x-www-form-urlencoded'):
+                                self.headers["Content-Type"] = 'application/x-www-form-urlencoded'
 
-                    if header.startswith('Content-Type: multipart/form-data'):
-                        request_Content_Type = 'multipart/form-data'
-                        request_Content_Boundary = header.split()[2].split('=')[1]
+                            elif t.startswith('multipart/form-data'):
+                                self.headers["Content-Type"] = 'multipart/form-data'          
 
-                    self.headers.append(header)
-                n_index = n_index + len(b'\r\n')
+                            elif t.startswith('application/json'):
+                                self.headers["Content-Type"] = 'application/json'          
+
+                            elif t.startswith('charset'):     # todo exctract charset
+                                self.headers["Content-Type-charset"] = 'utf-8'
+                                
+                            elif t.startswith('boundary'):     
+                                self.headers["Content-Type-boundary"] = t.split('=')[1]
+                    
+                    elif header.startswith('Sec-WebSocket-Key:'):
+                        self.headers["Sec-WebSocket-Key"] = header.split()[1]
+
+                    self.requestlines.append(header)
+                    lend = lend + len(b'\r\n')
 
             # additional parsing
-            if request_Content_Type and request_Content_Type == 'application/x-www-form-urlencoded':
-                self.request_form = request[n_index:]
-                while len(self.request_form) < request_Content_Length:
-                    self.request_form = self.request_form + self.socket.recv(4 * 1024)
+            if "Content-Type" in self.headers:
+                if self.headers["Content-Type"] == 'application/x-www-form-urlencoded':
+                    self.data = request[lend:]
 
-            # https://www.w3.org/TR/html401/interact/forms.html#h-17.13.4
-            # yea, not easy, boundry might change, making things more complicated
-            if request_Content_Type and request_Content_Type == 'multipart/form-data':
-                raise NotImplementedError
-                self.content = request[n_index:]
-                while len(self.content) < request_Content_Length:
-                    self.content = self.content + self.socket.recv(4 * 1024)
+                    # receive rest of expected data, once match
+                    while len(self.data) < self.headers["Content-Length"] :
+                        self.socket.settimeout(30)
+                        self.data = self.data + self.socket.recv(4 * 1024)
+                        self.socket.settimeout(None)
+
+                    t = self.data.decode('utf-8')
+                    self.data = dict(item.split("=") for item in t.split("&"))
+
+                if self.headers["Content-Type"] == 'application/json':
+                    self.data = request[lend:]
+
+                    # receive rest of expected data, once match
+                    while len(self.data) < self.headers["Content-Length"] :
+                        self.socket.settimeout(30)
+                        self.data = self.data + self.socket.recv(4 * 1024)
+                        self.socket.settimeout(None)
+
+                    t = self.data.decode('utf-8')
+                    self.data = json.loads(t)
+
+                # https://www.w3.org/TR/html401/interact/forms.html#h-17.13.4
+                # yea, not easy, boundry might change, making things more complicated
+                if self.headers["Content-Type"] == 'multipart/form-data':
+                    self.data = []
+                    self.content = request[lend:]
+
+                    while len(self.content) < self.headers["Content-Length"]:
+                        self.socket.settimeout(30)
+                        self.content = self.content + self.socket.recv(4 * 1024)
+                        self.socket.settimeout(None)
+
+                    lend = 0
+                    lbegin = 0
+                    
+                    formdata = dict()
+                    while 1:
+                        lbegin = lend
+                        lend = self.content.index(b'\r\n', lend)
+                        if lbegin == lend:
+                            lend = lend + len(b'\r\n')
+                            lbegin = lend 
+                            lend = self.content.index(b'\r\n' + bytes(formdata["Content-Disposition-boundary"], "ascii"), lend)
+                            formdata["Content"] = self.content[lbegin:lend]
+                            lend = lend + len(b'\r\n')
+                            self.data.append(formdata)
+                            formdata = dict()
+                        else:
+                            header = (self.content[lbegin:lend]).decode('ascii')
+
+                            if header.endswith(self.headers["Content-Type-boundary"] + '--'):
+                                break
+                            
+                            elif header.startswith('--' + self.headers["Content-Type-boundary"]):
+                                formdata["Content-Disposition-boundary"] = '--' + self.headers["Content-Type-boundary"]
+
+                            elif header.startswith('Content-Disposition:'):
+                                for t in header.split():
+                                    if t.startswith('form-data'):
+                                        formdata["Content-Disposition"] = 'form-data'
+                                        
+                                    elif t.startswith('name='):
+                                        formdata["Content-Disposition-name"] = t[len('name="'):len(t) - 1]
+                                    
+                                    elif t.startswith('filename='):
+                                        formdata["Content-Disposition-filename"] = t[len('filename="'):len(t) - 1]                                   
+
+                            elif header.startswith('Content-Type:'):
+                                formdata["Content-Type"] = header.split()[1]
+
+                            lend = lend + len(b'\r\n')
 
             self.command, self.route, self.version = None, None, None
 
             # extracting verb, route, version
-            if len(self.headers) > 0:
-                logging.info(self.headers[0])
-                words = self.headers[0].split()
+            if len(self.requestlines) > 0:
+                logging.info(self.requestlines[0])
+                words = self.requestlines[0].split()
+
                 if len(words) == 3:
                     self.command, self.route, self.version = words
                 elif len(words) == 2:
@@ -189,13 +262,11 @@ class PythonWebInterface(Thread):
 
                 if endpoint:
                     endpoint.Respond(self)
-                else:
-                    raise NotImplementedError
-
-                self.socket.close()
-
+    
             except Exception as ex:
                 logging.critical(ex)
+            
+            finally:
                 self.socket.close()
 
     class Endpoint(object):
@@ -208,9 +279,9 @@ class PythonWebInterface(Thread):
 
     class WebStaticEndpoint(Endpoint):
         def __init__(self, path):
+            logging.info('content path ' + path)
             self.route = '*'
             self.path = path
-            logging.info('content path : ' + self.path)
 
         def Respond(self, sockth):
             try:
@@ -218,10 +289,12 @@ class PythonWebInterface(Thread):
                     content = f.read(16*1024*1024)
                     contentlen = len(content)
                     
-            except FileNotFoundError:
+            except FileNotFoundError as ex:
+                logging.critical(ex)
                 sockth.socket.send(b'HTTP/1.1 404 Not Found\r\n')
                 return
-                    
+
+            # todo implement larger file streaming
             if contentlen == 16*1024*1024:
                 raise NotImplementedError
                 
@@ -253,35 +326,56 @@ class PythonWebInterface(Thread):
             self.route = route
             self.callback = callback
 
-        def Respond(self, sockth):
-            self.OnReady(sockth)
-
         def OnReady(self, sockth):
-            pl = sockth.request_form.decode('utf-8')
-            pl_parsed = dict(item.split("=") for item in pl.split("&"))
             # urlparse.parse_qs("Name1=Value1;Name2=Value2;Name3=Value3")
             method = self.callback
-            content = method(**pl_parsed)
+            content = method(**sockth.data)
             contentlen = bytes(str(len(content)), "ascii")
             sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
             sockth.socket.send(b'Content-Length: ' + contentlen + b'\r\n')
             sockth.socket.send(b'Connection: Closed\r\n')
             sockth.socket.send(b'\r\n')
+            
             if content != None:
                 sockth.socket.send(content)
+        
+        def Respond(self, sockth):
+            self.OnReady(sockth)
 
-    # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
-    # * IE, Edge Not supported
-    # event: A string identifying the type of event described. If this is specified, an event will be dispatched on the browser to the listener for the specified event name;
-    #       the website source code should use addEventListener() to listen for named events. The onmessage handler is called if no event name is specified for a message.
-    # data: The data field for the message. When the EventSource receives multiple consecutive lines that begin with data:,
-    #       it will concatenate them, inserting a newline character between each one. Trailing newlines are removed.
-    # id: The event ID to set the EventSource object's last event ID value.
-    #       retry: The reconnection time to use when attempting to send the event. This must be an integer, specifying the reconnection time in milliseconds.
-    #       If a non-integer value is specified, the field is ignored.
     class ServerSentEventEndpoint(Endpoint):
+        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+        # * IE, Edge Not supported
+        # event: A string identifying the type of event described. If this is specified, an event will be dispatched on the browser to the listener for the specified event name;
+        #       the website source code should use addEventListener() to listen for named events. The onmessage handler is called if no event name is specified for a message.
+        # data: The data field for the message. When the EventSource receives multiple consecutive lines that begin with data:,
+        #       it will concatenate them, inserting a newline character between each one. Trailing newlines are removed.
+        # id: The event ID to set the EventSource object's last event ID value.
+        #       retry: The reconnection time to use when attempting to send the event. This must be an integer, specifying the reconnection time in milliseconds.
+        #       If a non-integer value is specified, the field is ignored.
         def __init__(self, route):
             super().__init__(route, None)
+
+        def Send(self, sockth, id, event, data, retry):
+            if id:
+                sockth.socket.send(b'id: ' + id + b'\r\n')
+
+            if event:
+                sockth.socket.send(b'event: ' + event + b'\r\n')
+
+            if data:
+                sockth.socket.send(b'data: ' + data + b'\r\n')
+                    
+            if retry:
+                sockth.socket.send(b'retry: ' + retry + b'\r\n')
+
+            sockth.socket.send(b'\r\n')
+
+        def OnReady(self, sockth):
+            while 1:
+                self.Send(sockth, None, None, b'Server Side Event - default message', None)
+                time.sleep(1)
+                self.Send(sockth, None, b'customevent', b'Server Side Event - customevent', None)
+                time.sleep(1)
 
         def Respond(self, sockth):
             sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
@@ -290,48 +384,13 @@ class PythonWebInterface(Thread):
             sockth.socket.send(b'\r\n')
             self.OnReady(sockth)
 
-        def Send(self, sockth, id, event, data, retry):
-            if id:
-                sockth.socket.send(b'id: ' + id + b'\r\n')
-            if event:
-                sockth.socket.send(b'event: ' + event + b'\r\n')
-            if data:
-                sockth.socket.send(b'data: ' + data + b'\r\n')
-            if retry:
-                sockth.socket.send(b'retry: ' + retry + b'\r\n')
-
-            sockth.socket.send(b'\r\n')
-
-        def OnReady(self, sockth):
-            while 1:
-                self.Send(sockth, None, None,
-                          b'Server Side Event - onmessage', None)
-                time.sleep(1)
-                self.Send(sockth, None, b'customevent',
-                          b'Server Side Event - customevent', None)
-                time.sleep(1)
-
     class WebSocketEndpoint(Endpoint):
         def __init__(self, route, onReady):
-            self.__MAGICSTRING = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
             self.route = route
             self.onReady = onReady
 
-        def Respond(self, sockth):
-            key = [s for s in sockth.headers if "Sec-WebSocket-Key" in s]
-            if len(key) == 1:
-                skey = key[0].split(':')[1].strip()
-                stoken = skey + self.__MAGICSTRING
-                stokensha1 = hashlib.sha1(stoken.encode('utf-8'))
-                secWebSocketAccept = base64.b64encode(stokensha1.digest())
-                sockth.socket.send(b'HTTP/1.1 101 Switching Protocols\r\n')
-                sockth.socket.send(b'Upgrade: websocket\r\n')
-                sockth.socket.send(b'Connection: Upgrade\r\n')
-                sockth.socket.send(b'Sec-WebSocket-Accept: ' + secWebSocketAccept + b'\r\n')
-                sockth.socket.send(b'\r\n')
-            self.OnReady(sockth)
-
         def Receive(self, sockth):
+            # todo implement big packets recev
             # partial recv looks like wont happen, how ever multiple packets may need to be received and combined
             request = sockth.socket.recv(4096)
             fin = request[0] & 0x80 == 128
@@ -386,6 +445,7 @@ class PythonWebInterface(Thread):
 
             if pllen < 125:
                 b2 |= pllen
+
             elif pllen > 124:
                 raise NotImplementedError
 
@@ -399,6 +459,22 @@ class PythonWebInterface(Thread):
                 response = self.Receive(sockth)
                 if response != None:
                     self.Send(sockth, response)
+
+        def Respond(self, sockth):
+            __MAGICSTRING = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+            if "Sec-WebSocket-Key" in sockth.headers:
+                skey = sockth.headers["Sec-WebSocket-Key"]
+                stoken = skey + __MAGICSTRING
+                stokensha1 = hashlib.sha1(stoken.encode('utf-8'))
+                secWebSocketAccept = base64.b64encode(stokensha1.digest())
+                sockth.socket.send(b'HTTP/1.1 101 Switching Protocols\r\n')
+                sockth.socket.send(b'Upgrade: websocket\r\n')
+                sockth.socket.send(b'Connection: Upgrade\r\n')
+                sockth.socket.send(b'Sec-WebSocket-Accept: ' + secWebSocketAccept + b'\r\n')
+                sockth.socket.send(b'\r\n')
+                self.OnReady(sockth)
+            else:
+                raise Exception("websocket upgrade issue")
 
     def __init__(self, hostname, port = 80, cert = None):
         Thread.__init__(self)
@@ -425,6 +501,7 @@ class PythonWebInterface(Thread):
         """
         self.listening = False
         time.sleep(1)
+
         # connect again to release the listener for terminating the connection
         t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         t.connect((self.hostname, self.port))
@@ -443,7 +520,19 @@ class PythonWebInterface(Thread):
                     sockclint, addr = socksrvr.accept()
                     
                     if self.cert:
-                        sockclint = ssl.wrap_socket(sockclint, certfile = self.cert, server_side = True)
+                        try:
+                            sockclint = ssl.wrap_socket(sockclint, certfile = self.cert, server_side = True)
+
+                        except Exception as ex:
+                            logging.critical(ex)
+
+                            # client rejects the certifcate?
+                            if ex.args[1].startswith('[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN]'):
+                                continue
+
+                            # a regular socket was connect to secure endpoint
+                            if ex.args[1].startswith('[SSL: HTTP_REQUEST]'):
+                                continue
 
                     logging.debug('connect ' + ':'.join(str(x) for x in addr))
                     PythonWebInterface.ServiceHandlerThread(sockclint, addr, self).start()
@@ -451,18 +540,8 @@ class PythonWebInterface(Thread):
                 except Exception as ex:
                     logging.critical(ex)
 
-                    if self.cert:
-                        # client rejects the certifcate?
-                        if ex.args[1].startswith('[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN]'):
-                            continue
-
-                        # a regular socket was connect to secure endpoint
-                        if ex.args[1].startswith('[SSL: HTTP_REQUEST]'):
-                            continue
-
                     socksrvr.close()
                     break
-
 
 if __name__ == '__main__':
     def TestSocket(payload):
@@ -476,7 +555,7 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - [%(levelname)-5.5s] - %(message)s')
 
-    pwui = PythonWebInterface('', 65120)
+    pwui = PythonWebInterface('', 65125)
 
     pwui.RegisterEndpoint(PythonWebInterface.WebServiceEndpoint('/TestAjax', TestAjax))
 
@@ -494,7 +573,8 @@ if __name__ == '__main__':
 
     try:
         pwui.join()
-    except KeyboardInterrupt:
-        logging.debug('closing server')
+        
+    except KeyboardInterrupt as ex:
+        logging.critical(ex)
         pwui.stop()
         pwui.join()

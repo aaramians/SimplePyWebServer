@@ -68,14 +68,46 @@
          // converters (default: {"* text": window.String, "text html": true, "text json": jQuery.parseJSON, "text xml": jQuery.parseXML})
          // dataType (default: Intelligent Guess (xml, json, script, or html))
 
+         // $.ajax({
+         //    type: "POST",
+         //    url: 'TestAjax',
+         //    data: { param1: "param1", param2: "param2", param3: "param3" },
+         //    success: function (received_msg) {
+         //       document.getElementById("result").innerHTML += received_msg + "<br>";
+         //    },
+         // });
+
+
          $.ajax({
             type: "POST",
             url: 'TestAjax',
-            data: { param1: "param1", param2: "param2", param3: "param3" },
-            success: function (d) {
-               alert(d)
+            contentType: 'application/json; charset=utf-8',
+            data: JSON.stringify({ param1: "param1", param2: "param2", param3: "param3" }),
+            success: function (received_msg) {
+               document.getElementById("result").innerHTML += received_msg + "<br>";
             },
          });
+
+         // var formData = new FormData();
+
+         // formData.append("username", "Groucho");
+         // formData.append("accountnum", 123456); // number 123456 is immediately converted to a string "123456"
+         
+         // fileInputElement = document.getElementById('filetoupload')
+         // // HTML file input, chosen by user
+         // formData.append("userfile", fileInputElement.files[0]);
+
+         // // JavaScript file-like object
+         // var content = '<a id="a"><b id="b">hey!</b></a>'; // the body of the new file...
+         // var blob = new Blob([content], { type: "text/xml" });
+
+         // formData.append("webmasterfile", blob);
+
+         // var request = new XMLHttpRequest();
+         // request.open("POST", "TestPost");
+         // request.send(formData);
+
+
       }
 
       function VideoTest() {
@@ -98,9 +130,8 @@
 
    <div>
       <p>This is multipart/form-data.</p>
-      <form method="post" enctype="multipart/form-data">
-         <input type="file" name="fileToUpload" id="fileToUpload">
-         <input type="submit" value="Upload Image" name="submit">
+      <form id="attachform" method="post" enctype="multipart/form-data">
+         <input type="file" name="fileToUpload" id="filetoupload">
       </form>
    </div>
 
@@ -109,7 +140,7 @@
       <form method="post" enctype="application/x-www-form-urlencoded">
          <input type="text" name="param1">
          <input type="text" name="param2">
-         <input type="submit"/>
+         <input type="submit" />
       </form>
    </div>
 
