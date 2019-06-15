@@ -112,6 +112,52 @@ class PythonWebInterface(Thread):
             self.server = server
             self.daemon = True
 
+        def parse_ContentDisposition(self, header):
+            extract = {}
+            subname = None
+            subvalue = None
+            i = 0
+            j = 0
+            lx = len(header)
+            for c in header:
+                j = j + 1
+
+                if c == ':' and "identifier" not in extract:
+                    extract["identifier"] = header[i:j-1]
+                    i = j + 1
+                    continue
+
+                if c == "=" and not subname:
+                    subname = header[i:j-1]
+                    i = j
+                    continue
+
+                if c == ';' and subname and not subvalue:
+                    subvalue = header[i:j-1]
+                    extract[subname] = subvalue
+                    subname = None
+                    subvalue = None
+                    i = j + 1
+                    continue
+
+                if lx == j and subname and not subvalue:
+                    subvalue = header[i:j]
+                    extract[subname] = subvalue
+                    subname = None
+                    subvalue = None
+                    i = j + 1
+                    continue
+
+                if c == ';':
+                    extract[header[i:j-1]] = header[i:j-1]
+                    i = j + 1
+                    continue
+
+                if lx == j:
+                    extract[header[i:j-1]] = header[i:j-1]
+                    continue
+            return extract
+            
         def ResolveEndpoint(self):
             self.requestlines = []
             self.headers = {}
@@ -220,15 +266,16 @@ class PythonWebInterface(Thread):
                                 formdata["Content-Disposition-boundary"] = '--' + self.headers["Content-Type-boundary"]
 
                             elif header.startswith('Content-Disposition:'):
-                                for t in header.split():
-                                    if t.startswith('form-data'):
-                                        formdata["Content-Disposition"] = 'form-data'
-                                        
-                                    elif t.startswith('name='):
-                                        formdata["Content-Disposition-name"] = t[len('name="'):len(t) - 1]
+                                t = self.parse_ContentDisposition(header)
+                                
+                                if 'form-data' in t:
+                                    formdata["Content-Disposition"] = 'form-data'
+
+                                if 'name' in t:
+                                    formdata["Content-Disposition-name"] = t['name'].strip('"')
                                     
-                                    elif t.startswith('filename='):
-                                        formdata["Content-Disposition-filename"] = t[len('filename="'):len(t) - 1]                                   
+                                if 'filename' in t:
+                                    formdata["Content-Disposition-filename"] = t['filename'].strip('"')
 
                             elif header.startswith('Content-Type:'):
                                 formdata["Content-Type"] = header.split()[1]
@@ -551,7 +598,7 @@ if __name__ == '__main__':
 
     def TestAjax(param1, param2, param3):
         logging.debug('%s %s %s ', param1, param2, param3)
-        return b'Ajax Response'
+        return b'OK'
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - [%(levelname)-5.5s] - %(message)s')
 
