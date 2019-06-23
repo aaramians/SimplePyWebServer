@@ -31,6 +31,8 @@ import sys
 import ssl
 import json
 from threading import Thread
+import string
+import random
 
 if sys.version_info[0] < 3:
     raise Exception("Must be using Python 3")
@@ -101,64 +103,67 @@ __responses = {
     505: ('HTTP Version Not Supported', 'Cannot fulfill request.'),
 }
 
-class PythonWebInterface(Thread):
-    # every connection is handled with a thread, may not scale well, but very easy to deal with
-    class ServiceHandlerThread(Thread):
-        def __init__(self, socket, address, server):
-            Thread.__init__(self)
-            self.socket = socket
-            self.address = address
-            self.path = None
-            self.server = server
-            self.daemon = True
 
-        def parse_ContentDisposition(self, header):
-            extract = {}
-            subname = None
-            subvalue = None
-            i = 0
-            j = 0
-            lx = len(header)
-            for c in header:
-                j = j + 1
 
-                if c == ':' and "identifier" not in extract:
-                    extract["identifier"] = header[i:j-1]
-                    i = j + 1
-                    continue
+# every connection is handled with a thread, may not scale well, but very easy to deal with
+class SocketHanlderThread(Thread):
+    def __init__(self, socket, address, server):
+        Thread.__init__(self)
+        self.socket = socket
+        self.address = address
+        self.path = None
+        self.server = server
+        self.daemon = True
+        self.exception = None
 
-                if c == "=" and not subname:
-                    subname = header[i:j-1]
-                    i = j
-                    continue
+    def parse_ContentDisposition(self, header):
+        extract = {}
+        subname = None
+        subvalue = None
+        i = 0
+        j = 0
+        lx = len(header)
+        for c in header:
+            j = j + 1
 
-                if c == ';' and subname and not subvalue:
-                    subvalue = header[i:j-1]
-                    extract[subname] = subvalue
-                    subname = None
-                    subvalue = None
-                    i = j + 1
-                    continue
+            if c == ':' and "identifier" not in extract:
+                extract["identifier"] = header[i:j-1]
+                i = j + 1
+                continue
 
-                if lx == j and subname and not subvalue:
-                    subvalue = header[i:j]
-                    extract[subname] = subvalue
-                    subname = None
-                    subvalue = None
-                    i = j + 1
-                    continue
+            if c == "=" and not subname:
+                subname = header[i:j-1]
+                i = j
+                continue
 
-                if c == ';':
-                    extract[header[i:j-1]] = header[i:j-1]
-                    i = j + 1
-                    continue
+            if c == ';' and subname and not subvalue:
+                subvalue = header[i:j-1]
+                extract[subname] = subvalue
+                subname = None
+                subvalue = None
+                i = j + 1
+                continue
 
-                if lx == j:
-                    extract[header[i:j-1]] = header[i:j-1]
-                    continue
-            return extract
-            
-        def ResolveEndpoint(self):
+            if lx == j and subname and not subvalue:
+                subvalue = header[i:j]
+                extract[subname] = subvalue
+                subname = None
+                subvalue = None
+                i = j + 1
+                continue
+
+            if c == ';':
+                extract[header[i:j-1]] = header[i:j-1]
+                i = j + 1
+                continue
+
+            if lx == j:
+                extract[header[i:j-1]] = header[i:j-1]
+                continue
+        return extract
+        
+    def run(self):
+        try:
             self.requestlines = []
             self.headers = {}
 
@@ -201,10 +206,21 @@ class PythonWebInterface(Thread):
                     elif header.startswith('Sec-WebSocket-Key:'):
                         self.headers["Sec-WebSocket-Key"] = header.split()[1]
 
+                    elif header.startswith('Cookie:'):
+                        self.headers["Cookie"] = header[len("Cookie: "):]
+
                     self.requestlines.append(header)
                     lend = lend + len(b'\r\n')
 
+            self.sessionid = None
+            
             # additional parsing
+            if "Cookie" in self.headers:
+                q = [h.split('=') for h in self.headers['Cookie'].split()]
+                cookies = dict((x,y.rstrip(';')) for x,y in q)
+                if 'sessionid' in cookies:
+                    self.sessionid = cookies['sessionid']
+
             if "Content-Type" in self.headers:
                 if self.headers["Content-Type"] == 'application/x-www-form-urlencoded':
                     self.data = request[lend:]
@@ -244,7 +260,7 @@ class PythonWebInterface(Thread):
                     lend = 0
                     lbegin = 0
                     
-                    formdata = dict()
+                    formdata = {}
                     while 1:
                         lbegin = lend
                         lend = self.content.index(b'\r\n', lend)
@@ -255,7 +271,7 @@ class PythonWebInterface(Thread):
                             formdata["Content"] = self.content[lbegin:lend]
                             lend = lend + len(b'\r\n')
                             self.data.append(formdata)
-                            formdata = dict()
+                            formdata = {}
                         else:
                             header = (self.content[lbegin:lend]).decode('ascii')
 
@@ -294,238 +310,262 @@ class PythonWebInterface(Thread):
                 elif len(words) == 2:
                     self.command, self.route = words
 
-            # routing the request/find the correct endpoint
-            endpoint = None
-            if self.route != None:
-                endpoint = self.server.defaultendpoint
-                if self.route in self.server.endpoints:
-                    endpoint = self.server.endpoints[self.route]
+            for e in self.server.endpoints:
+                e.Respond(self)
 
-            return endpoint
+        except Exception as ex:
+            logging.critical(ex)
+        
+        finally:
+            self.socket.close()
 
-        def run(self):
-            try:
-                endpoint = self.ResolveEndpoint()
+class Endpoint(object):
+    class Resolve(object):
+        def __init__(self):
+            self.exception = None
+            self.resume = True
 
-                if endpoint:
-                    endpoint.Respond(self)
+    def __init__(self, route):
+        self.route = route
+
+    def Respond(self, sockth):
+        if self.route == sockth.route:
+            return True
+        return False
+
+class ExceptionEndpoint(Endpoint):
+    def __init__(self):
+        super().__init__('Exception')
     
-            except Exception as ex:
-                logging.critical(ex)
-            
-            finally:
-                self.socket.close()
+    def Respond(self, sockth):
+        super().Respond(sockth)
 
-    class Endpoint(object):
-        def __init__(self, route, callback):
-            self.route = route
-            self.callback = callback
-
-        def Respond(self, sockth):
-            pass
-
-    class WebStaticEndpoint(Endpoint):
-        def __init__(self, path):
-            logging.info('content path ' + path)
-            self.route = '*'
-            self.path = path
-
-        def Respond(self, sockth):
-            mime = 'application/octet-stream'
-            
-            # use import mimetypes if gets complicated
-            if sockth.route.endswith(".html"):
-                mime = 'text/html'
-            elif sockth.route.endswith(".ico"):
-                mime = 'image/x-icon'
-            elif sockth.route.endswith(".css"):
-                mime = 'text/css'
-            elif sockth.route.endswith(".jpg"):
-                mime = 'image/jpeg'
-            elif sockth.route.endswith(".js"):
-                mime = 'application/javascript'
-            elif sockth.route.endswith(".mp4"):
-                mime = 'video/mp4'
-
+        if sockth.exception != None:
             try:
-                with open(self.path + sockth.route, 'rb') as f:
-                    content = f.read(16*1024*1024)
-                    contentlen = len(content)
-                    
-            except FileNotFoundError as ex:
-                logging.critical(ex)
+                raise sockth.exception
+            except FileNotFoundError:
                 sockth.socket.send(b'HTTP/1.1 404 Not Found\r\n')
-                return
 
-            # todo implement larger file streaming
-            if contentlen == 16*1024*1024:
-                raise NotImplementedError
+class WebStaticEndpoint(Endpoint):
+    def __init__(self, route):
+        super().__init__(route)
+        self.path = route
 
-            sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
-            sockth.socket.send(b'Content-Type: ' + bytes(mime, "ascii") + b'\r\n')
-            sockth.socket.send(b'Content-Length: ' + bytes(str(contentlen), "ascii") + b'\r\n')
-            sockth.socket.send(b'Connection: Closed\r\n')
-            sockth.socket.send(b'\r\n')
+    def randomString(self, stringLength=64):
+        """Generate a random string of fixed length """
+        letters = string.ascii_lowercase + string.digits
+        return ''.join(random.choice(letters) for i in range(stringLength))
+        
+    def Respond(self, sockth):
+        try:
+            with open(self.path + sockth.route, 'rb') as f:
+                content = f.read(16*1024*1024)
+                contentlen = len(content)
+                
+        except FileNotFoundError as ex:
+            logging.critical(ex)
+            sockth.exception = ex
+            return
+
+        # todo implement larger file streaming
+        if contentlen == 16*1024*1024:
+            raise NotImplementedError
+
+        mime = 'application/octet-stream'
+        
+        # use import mimetypes if gets complicated
+        if sockth.route.endswith(".html"):
+            mime = 'text/html'
+        elif sockth.route.endswith(".ico"):
+            mime = 'image/x-icon'
+        elif sockth.route.endswith(".css"):
+            mime = 'text/css'
+        elif sockth.route.endswith(".jpg"):
+            mime = 'image/jpeg'
+        elif sockth.route.endswith(".js"):
+            mime = 'application/javascript'
+        elif sockth.route.endswith(".mp4"):
+            mime = 'video/mp4'
+
+        sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
+        sockth.socket.send(b'Content-Type: ' + bytes(mime, "ascii") + b'\r\n')
+        sockth.socket.send(b'Content-Length: ' + bytes(str(contentlen), "ascii") + b'\r\n')
+        
+        if sockth.sessionid == None:
+            sockth.sessionid = self.randomString()
+            logging.debug('new session ' + sockth.sessionid)
+            sockth.socket.send(b'Set-Cookie: sessionid=' + bytes(str(sockth.sessionid), "ascii")  + b'\r\n')
+        
+        sockth.socket.send(b'Connection: Closed\r\n')
+        sockth.socket.send(b'\r\n')
+        sockth.socket.send(content)
+
+class WebServiceEndpoint(Endpoint):
+    def __init__(self, route, callback):
+        super().__init__(route)
+        self.callback = callback
+
+    def OnReady(self, sockth):
+        # urlparse.parse_qs("Name1=Value1;Name2=Value2;Name3=Value3")
+        method = self.callback
+        content = method(**sockth.data)
+        contentlen = bytes(str(len(content)), "ascii")
+        sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
+        sockth.socket.send(b'Content-Length: ' + contentlen + b'\r\n')
+        sockth.socket.send(b'Connection: Closed\r\n')
+        sockth.socket.send(b'\r\n')
+        
+        if content != None:
             sockth.socket.send(content)
     
-    class WebServiceEndpoint(Endpoint):
-        def __init__(self, route, callback):
-            self.route = route
-            self.callback = callback
+    def Respond(self, sockth):
+        if not super().Respond(sockth):
+            return False            
+        self.OnReady(sockth)
 
-        def OnReady(self, sockth):
-            # urlparse.parse_qs("Name1=Value1;Name2=Value2;Name3=Value3")
-            method = self.callback
-            content = method(**sockth.data)
-            contentlen = bytes(str(len(content)), "ascii")
-            sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
-            sockth.socket.send(b'Content-Length: ' + contentlen + b'\r\n')
-            sockth.socket.send(b'Connection: Closed\r\n')
-            sockth.socket.send(b'\r\n')
-            
-            if content != None:
-                sockth.socket.send(content)
-        
-        def Respond(self, sockth):
-            self.OnReady(sockth)
+class ServerSentEventEndpoint(Endpoint):
+    # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+    # * IE, Edge Not supported
+    # event: A string identifying the type of event described. If this is specified, an event will be dispatched on the browser to the listener for the specified event name;
+    #       the website source code should use addEventListener() to listen for named events. The onmessage handler is called if no event name is specified for a message.
+    # data: The data field for the message. When the EventSource receives multiple consecutive lines that begin with data:,
+    #       it will concatenate them, inserting a newline character between each one. Trailing newlines are removed.
+    # id: The event ID to set the EventSource object's last event ID value.
+    #       retry: The reconnection time to use when attempting to send the event. This must be an integer, specifying the reconnection time in milliseconds.
+    #       If a non-integer value is specified, the field is ignored.
+    def __init__(self, route):
+        super().__init__(route)
 
-    class ServerSentEventEndpoint(Endpoint):
-        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
-        # * IE, Edge Not supported
-        # event: A string identifying the type of event described. If this is specified, an event will be dispatched on the browser to the listener for the specified event name;
-        #       the website source code should use addEventListener() to listen for named events. The onmessage handler is called if no event name is specified for a message.
-        # data: The data field for the message. When the EventSource receives multiple consecutive lines that begin with data:,
-        #       it will concatenate them, inserting a newline character between each one. Trailing newlines are removed.
-        # id: The event ID to set the EventSource object's last event ID value.
-        #       retry: The reconnection time to use when attempting to send the event. This must be an integer, specifying the reconnection time in milliseconds.
-        #       If a non-integer value is specified, the field is ignored.
-        def __init__(self, route):
-            super().__init__(route, None)
+    def Send(self, sockth, id, event, data, retry):
+        if id:
+            sockth.socket.send(b'id: ' + id + b'\r\n')
 
-        def Send(self, sockth, id, event, data, retry):
-            if id:
-                sockth.socket.send(b'id: ' + id + b'\r\n')
+        if event:
+            sockth.socket.send(b'event: ' + event + b'\r\n')
 
-            if event:
-                sockth.socket.send(b'event: ' + event + b'\r\n')
+        if data:
+            sockth.socket.send(b'data: ' + data + b'\r\n')
+                
+        if retry:
+            sockth.socket.send(b'retry: ' + retry + b'\r\n')
 
-            if data:
-                sockth.socket.send(b'data: ' + data + b'\r\n')
+        sockth.socket.send(b'\r\n')
+
+    def OnReady(self, sockth):
+        while 1:
+            self.Send(sockth, None, None, b'Server Side Event - default message', None)
+            time.sleep(1)
+            self.Send(sockth, None, b'customevent', b'Server Side Event - customevent', None)
+            time.sleep(1)
+
+    def Respond(self, sockth):
+        if not super().Respond(sockth):
+            return False
                     
-            if retry:
-                sockth.socket.send(b'retry: ' + retry + b'\r\n')
+        sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
+        sockth.socket.send(b'Content-Type: text/event-stream\r\n')
+        sockth.socket.send(b'Cache-Control: no-cache\r\n')
+        sockth.socket.send(b'\r\n')
+        self.OnReady(sockth)
 
-            sockth.socket.send(b'\r\n')
+class WebSocketEndpoint(Endpoint):
+    def __init__(self, route, onReady):
+        super().__init__(route)
+        self.onReady = onReady
 
-        def OnReady(self, sockth):
-            while 1:
-                self.Send(sockth, None, None, b'Server Side Event - default message', None)
-                time.sleep(1)
-                self.Send(sockth, None, b'customevent', b'Server Side Event - customevent', None)
-                time.sleep(1)
+    def Receive(self, sockth):
+        # todo implement big packets recev
+        # partial recv looks like wont happen, how ever multiple packets may need to be received and combined
+        request = sockth.socket.recv(4096)
+        fin = request[0] & 0x80 == 128
+        opcode = request[0] & (0xF)
+        Mask = request[1] & 0x80 == 128
 
-        def Respond(self, sockth):
-            sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
-            sockth.socket.send(b'Content-Type: text/event-stream\r\n')
-            sockth.socket.send(b'Cache-Control: no-cache\r\n')
+        payload = bytearray()
+        plMask = None
+        plFlag = request[1] & 0x7F
+        plLen = 0
+        plStart = 0
+
+        if plFlag < 126:
+            plLen = plFlag
+            plStart = 2
+            if Mask:
+                plMask = [request[2], request[3], request[4], request[5]]
+                plStart = 2 + 4
+
+        elif plFlag == 126:
+            plLen = (request[2] << 8) + request[3]
+            plStart = 4
+            if Mask:
+                plMask = [request[4], request[5], request[6], request[7]]
+                plStart = 4 + 4
+
+        elif plFlag == 127:
+            plLen = (request[2] << 24) + (request[3] <<
+                                            16) + (request[4] << 8) + request[5]
+            plStart = 6
+            if Mask:
+                plMask = [request[6], request[7], request[8], request[9]]
+                plStart = 6 + 4
+
+        i = 0
+        for b in request[plStart:]:
+            if Mask:
+                payload.append(b ^ plMask[i % 4])
+            else:
+                payload.append(b)
+            i = i + 1
+            plLen = plLen - 1
+        return payload
+
+    def Send(self, sockth, payload):
+        pllen = len(payload)
+        plbytes = bytearray()
+        b1, b2 = 0, 0
+        opcode = 0x1
+        fin = 1
+        b1 = opcode | fin << 7
+
+        if pllen < 125:
+            b2 |= pllen
+
+        elif pllen > 124:
+            raise NotImplementedError
+
+        plbytes.append(b1)
+        plbytes.append(b2)
+        plbytes.extend(payload)
+        sockth.socket.send(plbytes)
+
+    def OnReady(self, sockth):
+        while 1:
+            response = self.Receive(sockth)
+            if response != None:
+                self.Send(sockth, response)
+
+    def Respond(self, sockth):
+        if not super().Respond(sockth):
+            return False
+
+        if "Sec-WebSocket-Key" in sockth.headers:
+            skey = sockth.headers["Sec-WebSocket-Key"]
+            stoken = skey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11' # MAGICSTRING
+            stokensha1 = hashlib.sha1(stoken.encode('utf-8'))
+            secWebSocketAccept = base64.b64encode(stokensha1.digest())
+            sockth.socket.send(b'HTTP/1.1 101 Switching Protocols\r\n')
+            sockth.socket.send(b'Upgrade: websocket\r\n')
+            sockth.socket.send(b'Connection: Upgrade\r\n')
+            sockth.socket.send(b'Sec-WebSocket-Accept: ' + secWebSocketAccept + b'\r\n')
             sockth.socket.send(b'\r\n')
             self.OnReady(sockth)
+        else:
+            sockth.exception = Exception("No Sec-WebSocket-Key in headers")
 
-    class WebSocketEndpoint(Endpoint):
-        def __init__(self, route, onReady):
-            self.route = route
-            self.onReady = onReady
-
-        def Receive(self, sockth):
-            # todo implement big packets recev
-            # partial recv looks like wont happen, how ever multiple packets may need to be received and combined
-            request = sockth.socket.recv(4096)
-            fin = request[0] & 0x80 == 128
-            opcode = request[0] & (0xF)
-            Mask = request[1] & 0x80 == 128
-
-            payload = bytearray()
-            plMask = None
-            plFlag = request[1] & 0x7F
-            plLen = 0
-            plStart = 0
-
-            if plFlag < 126:
-                plLen = plFlag
-                plStart = 2
-                if Mask:
-                    plMask = [request[2], request[3], request[4], request[5]]
-                    plStart = 2 + 4
-
-            elif plFlag == 126:
-                plLen = (request[2] << 8) + request[3]
-                plStart = 4
-                if Mask:
-                    plMask = [request[4], request[5], request[6], request[7]]
-                    plStart = 4 + 4
-
-            elif plFlag == 127:
-                plLen = (request[2] << 24) + (request[3] <<
-                                              16) + (request[4] << 8) + request[5]
-                plStart = 6
-                if Mask:
-                    plMask = [request[6], request[7], request[8], request[9]]
-                    plStart = 6 + 4
-
-            i = 0
-            for b in request[plStart:]:
-                if Mask:
-                    payload.append(b ^ plMask[i % 4])
-                else:
-                    payload.append(b)
-                i = i + 1
-                plLen = plLen - 1
-            return payload
-
-        def Send(self, sockth, payload):
-            pllen = len(payload)
-            plbytes = bytearray()
-            b1, b2 = 0, 0
-            opcode = 0x1
-            fin = 1
-            b1 = opcode | fin << 7
-
-            if pllen < 125:
-                b2 |= pllen
-
-            elif pllen > 124:
-                raise NotImplementedError
-
-            plbytes.append(b1)
-            plbytes.append(b2)
-            plbytes.extend(payload)
-            sockth.socket.send(plbytes)
-
-        def OnReady(self, sockth):
-            while 1:
-                response = self.Receive(sockth)
-                if response != None:
-                    self.Send(sockth, response)
-
-        def Respond(self, sockth):
-            __MAGICSTRING = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-            if "Sec-WebSocket-Key" in sockth.headers:
-                skey = sockth.headers["Sec-WebSocket-Key"]
-                stoken = skey + __MAGICSTRING
-                stokensha1 = hashlib.sha1(stoken.encode('utf-8'))
-                secWebSocketAccept = base64.b64encode(stokensha1.digest())
-                sockth.socket.send(b'HTTP/1.1 101 Switching Protocols\r\n')
-                sockth.socket.send(b'Upgrade: websocket\r\n')
-                sockth.socket.send(b'Connection: Upgrade\r\n')
-                sockth.socket.send(b'Sec-WebSocket-Accept: ' + secWebSocketAccept + b'\r\n')
-                sockth.socket.send(b'\r\n')
-                self.OnReady(sockth)
-            else:
-                raise Exception("websocket upgrade issue")
-
+class PythonWebCore(Thread):
     def __init__(self, hostname, port = 80, cert = None):
         Thread.__init__(self)
-        self.endpoints = {}
+        self.endpoints = []
         self.defaultendpoint = None
         self.hostname = hostname
         self.port = port
@@ -533,13 +573,9 @@ class PythonWebInterface(Thread):
         self.listening = False
         self.cert = cert
 
-    def RegisterEndpoint(self, endpoint, default = False):
+    def RegisterEndpoint(self, endpoint):
         logging.debug('registering endpoint ' + endpoint.route)
-        self.endpoints[endpoint.route] = endpoint
-
-        if default:
-            self.defaultendpoint = endpoint
-
+        self.endpoints.append(endpoint)
         return endpoint
 
     def stop(self):
@@ -582,7 +618,7 @@ class PythonWebInterface(Thread):
                                 continue
 
                     logging.debug('connect ' + ':'.join(str(x) for x in addr))
-                    PythonWebInterface.ServiceHandlerThread(sockclint, addr, self).start()
+                    SocketHanlderThread(sockclint, addr, self).start()
     
                 except Exception as ex:
                     logging.critical(ex)
@@ -602,20 +638,22 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - [%(levelname)-5.5s] - %(message)s')
 
-    pwui = PythonWebInterface('', 65125)
+    pwui = PythonWebCore('', 65125)
 
-    pwui.RegisterEndpoint(PythonWebInterface.WebServiceEndpoint('/TestAjax', TestAjax))
+    pwui.RegisterEndpoint(WebServiceEndpoint('/TestAjax', TestAjax))
 
-    ws = pwui.RegisterEndpoint(PythonWebInterface.WebSocketEndpoint('/TestSocket', TestSocket))
+    ws = pwui.RegisterEndpoint(WebSocketEndpoint('/TestSocket', TestSocket))
     # ws.OnReady = TestCustomOnReady
     
-    sse = pwui.RegisterEndpoint(PythonWebInterface.ServerSentEventEndpoint('/TestSSE'))
-
+    sse = pwui.RegisterEndpoint(ServerSentEventEndpoint('/TestSSE'))
+    
     from os import path as ospath
-    wse = pwui.RegisterEndpoint(PythonWebInterface.WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents'), True)
+    wse = pwui.RegisterEndpoint(WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents'))
+    pwui.RegisterEndpoint(ExceptionEndpoint())
+
     pwui.start()
 
-    logging.debug('http://localhost:' + str(pwui.port) + '/PythonWebInterface.html')
+    logging.debug('http://localhost:' + str(pwui.port) + '/PythonWebCore.html')
     logging.info('Press Ctrl+C to terminate.')
 
     try:
