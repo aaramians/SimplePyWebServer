@@ -206,6 +206,9 @@ class SocketHanlderThread(Thread):
                     elif header.startswith('Sec-WebSocket-Key:'):
                         self.headers["Sec-WebSocket-Key"] = header.split()[1]
 
+                    elif header.startswith('Authorization:'):
+                        self.headers["Authorization"] = header.split()[2]
+
                     elif header.startswith('Cookie:'):
                         self.headers["Cookie"] = header[len("Cookie: "):]
 
@@ -310,8 +313,7 @@ class SocketHanlderThread(Thread):
                 elif len(words) == 2:
                     self.command, self.route = words
 
-            for e in self.server.endpoints:
-                e.Respond(self)
+            self.server.endpoints[0].Respond(self)
 
         except Exception as ex:
             logging.critical(ex)
@@ -320,22 +322,67 @@ class SocketHanlderThread(Thread):
             self.socket.close()
 
 class Endpoint(object):
-    class Resolve(object):
-        def __init__(self):
-            self.exception = None
-            self.resume = True
+    def __init__(self):
+        pass
 
+    def Respond(self, sockth):
+        return True
+
+class RouteEndpoint(Endpoint):
     def __init__(self, route):
+        super().__init__()
         self.route = route
 
     def Respond(self, sockth):
-        if self.route == sockth.route:
+        return super().Respond(sockth)
+
+class MultiRouteEndpoint(Endpoint):
+    def __init__(self, endpoints):
+        super().__init__()
+        self.endpoints = endpoints
+
+    def Respond(self, sockth):
+        super().Respond(sockth)
+        endpoint = self.endpoints[0]
+        for e in self.endpoints:
+            if sockth.route == e.route:
+                endpoint = e
+
+        endpoint.Respond(sockth)
+
+class WWWAuthenticateBasicEndpoint(Endpoint):
+    def __init__(self, username, password ,endpoint):
+        super().__init__()
+        self.username = username
+        self.password = password
+        self.endpoint = endpoint
+        self.sessionids = []
+
+    def Authenticate(self, sockth):
+        if sockth.sessionid in self.sessionids:
             return True
+
+        if 'Authorization' in sockth.headers:
+            token = base64.b64decode(sockth.headers['Authorization']).decode("ascii")
+            
+            if token == self.username + ':' +  self.password:
+                self.sessionids.append(sockth.sessionid)
+                return True
+                
         return False
+    
+    def Respond(self, sockth):
+        super().Respond(sockth)
+
+        if self.Authenticate(sockth):
+            self.endpoint.Respond(sockth)
+        else:
+            sockth.socket.send(b'HTTP/1.1 401 Unauthorized\r\n')
+            sockth.socket.send(b'WWW-Authenticate: Basic realm="User Visible Realm", charset="UTF-8"\r\n')
 
 class ExceptionEndpoint(Endpoint):
     def __init__(self):
-        super().__init__('Exception')
+        super().__init__()
     
     def Respond(self, sockth):
         super().Respond(sockth)
@@ -346,10 +393,10 @@ class ExceptionEndpoint(Endpoint):
             except FileNotFoundError:
                 sockth.socket.send(b'HTTP/1.1 404 Not Found\r\n')
 
-class WebStaticEndpoint(Endpoint):
-    def __init__(self, route):
-        super().__init__(route)
-        self.path = route
+class WebStaticEndpoint(RouteEndpoint):
+    def __init__(self, path, cache = False):
+        super().__init__('')
+        self.path = path
 
     def randomString(self, stringLength=64):
         """Generate a random string of fixed length """
@@ -400,7 +447,7 @@ class WebStaticEndpoint(Endpoint):
         sockth.socket.send(b'\r\n')
         sockth.socket.send(content)
 
-class WebServiceEndpoint(Endpoint):
+class WebServiceEndpoint(RouteEndpoint):
     def __init__(self, route, callback):
         super().__init__(route)
         self.callback = callback
@@ -423,7 +470,7 @@ class WebServiceEndpoint(Endpoint):
             return False            
         self.OnReady(sockth)
 
-class ServerSentEventEndpoint(Endpoint):
+class ServerSentEventEndpoint(RouteEndpoint):
     # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
     # * IE, Edge Not supported
     # event: A string identifying the type of event described. If this is specified, an event will be dispatched on the browser to the listener for the specified event name;
@@ -468,7 +515,7 @@ class ServerSentEventEndpoint(Endpoint):
         sockth.socket.send(b'\r\n')
         self.OnReady(sockth)
 
-class WebSocketEndpoint(Endpoint):
+class WebSocketEndpoint(RouteEndpoint):
     def __init__(self, route, onReady):
         super().__init__(route)
         self.onReady = onReady
@@ -574,7 +621,7 @@ class PythonWebCore(Thread):
         self.cert = cert
 
     def RegisterEndpoint(self, endpoint):
-        logging.debug('registering endpoint ' + endpoint.route)
+        logging.debug('registering endpoint ' + type(endpoint).__name__)
         self.endpoints.append(endpoint)
         return endpoint
 
@@ -638,28 +685,34 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - [%(levelname)-5.5s] - %(message)s')
 
-    pwui = PythonWebCore('', 65125)
+    pwc = PythonWebCore('', 65125)
 
-    pwui.RegisterEndpoint(WebServiceEndpoint('/TestAjax', TestAjax))
+    # pwc.RegisterEndpoint()
 
-    ws = pwui.RegisterEndpoint(WebSocketEndpoint('/TestSocket', TestSocket))
-    # ws.OnReady = TestCustomOnReady
+    #
+    # # ws.OnReady = TestCustomOnReady
     
-    sse = pwui.RegisterEndpoint(ServerSentEventEndpoint('/TestSSE'))
-    
+
     from os import path as ospath
-    wse = pwui.RegisterEndpoint(WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents'))
-    pwui.RegisterEndpoint(ExceptionEndpoint())
+    ep_static = WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents')
+    ep_webservice = WebServiceEndpoint('/TestAjax', TestAjax)
+    ep_serverevent = ServerSentEventEndpoint('/TestSSE')
+    ep_websocket = WebSocketEndpoint('/TestSocket', TestSocket)
+    ep_multiroute = MultiRouteEndpoint([ep_static, ep_webservice, ep_serverevent, ep_websocket])
+    ep_authenticate = WWWAuthenticateBasicEndpoint(ep_multiroute, "admin", "admin")
+    ep_exception = ExceptionEndpoint()
+    
+    pwc.RegisterEndpoint(ep_authenticate)
 
-    pwui.start()
+    pwc.start()
 
-    logging.debug('http://localhost:' + str(pwui.port) + '/PythonWebCore.html')
+    logging.debug('http://localhost:' + str(pwc.port) + '/PythonWebCore.html' + ' login using admin/admin')
     logging.info('Press Ctrl+C to terminate.')
 
     try:
-        pwui.join()
+        pwc.join()
         
     except KeyboardInterrupt as ex:
         logging.critical(ex)
-        pwui.stop()
-        pwui.join()
+        pwc.stop()
+        pwc.join()
