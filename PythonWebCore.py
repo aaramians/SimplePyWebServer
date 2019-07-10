@@ -323,8 +323,14 @@ class SocketHanlderThread(Thread):
 
 class Endpoint(object):
     def __init__(self):
-        pass
+        self.Exception = None
+        self.Owner = None
 
+    def randomString(self, stringLength=64):
+        """Generate a random string of fixed length """
+        letters = string.ascii_lowercase + string.digits
+        return ''.join(random.choice(letters) for i in range(stringLength))
+        
     def Respond(self, sockth):
         return True
 
@@ -339,24 +345,37 @@ class RouteEndpoint(Endpoint):
 class MultiRouteEndpoint(Endpoint):
     def __init__(self, endpoints):
         super().__init__()
+        
         self.endpoints = endpoints
+        
+        for e in self.endpoints:
+            e.Owner = self
 
     def Respond(self, sockth):
         super().Respond(sockth)
+
+        # grabing the first endpoint as default endpoint
         endpoint = self.endpoints[0]
+
         for e in self.endpoints:
             if sockth.route == e.route:
                 endpoint = e
+                break
 
         endpoint.Respond(sockth)
 
+        return True
+
 class WWWAuthenticateBasicEndpoint(Endpoint):
-    def __init__(self, username, password ,endpoint):
+    def __init__(self, username, password , endpoints):
         super().__init__()
         self.username = username
         self.password = password
-        self.endpoint = endpoint
+        self.endpoints = endpoints
         self.sessionids = []
+
+        for e in self.endpoints:
+            e.Owner = self
 
     def Authenticate(self, sockth):
         if sockth.sessionid in self.sessionids:
@@ -375,10 +394,15 @@ class WWWAuthenticateBasicEndpoint(Endpoint):
         super().Respond(sockth)
 
         if self.Authenticate(sockth):
-            self.endpoint.Respond(sockth)
+            self.endpoints[0].Respond(sockth)
         else:
-            sockth.socket.send(b'HTTP/1.1 401 Unauthorized\r\n')
-            sockth.socket.send(b'WWW-Authenticate: Basic realm="User Visible Realm", charset="UTF-8"\r\n')
+            if len(self.endpoints) == 2:
+                self.endpoints[1].Respond(sockth)
+            else:
+                sockth.socket.send(b'HTTP/1.1 401 Unauthorized\r\n')
+                sockth.socket.send(b'WWW-Authenticate: Basic realm="User Visible Realm", charset="UTF-8"\r\n')
+
+        return True
 
 class ExceptionEndpoint(Endpoint):
     def __init__(self):
@@ -398,11 +422,6 @@ class WebStaticEndpoint(RouteEndpoint):
         super().__init__('')
         self.path = path
 
-    def randomString(self, stringLength=64):
-        """Generate a random string of fixed length """
-        letters = string.ascii_lowercase + string.digits
-        return ''.join(random.choice(letters) for i in range(stringLength))
-        
     def Respond(self, sockth):
         try:
             with open(self.path + sockth.route, 'rb') as f:
@@ -412,7 +431,8 @@ class WebStaticEndpoint(RouteEndpoint):
         except FileNotFoundError as ex:
             logging.critical(ex)
             sockth.exception = ex
-            return
+            sockth.socket.send(b'HTTP/1.1 404 Not Found\r\n')
+            return False
 
         # todo implement larger file streaming
         if contentlen == 16*1024*1024:
@@ -446,6 +466,8 @@ class WebStaticEndpoint(RouteEndpoint):
         sockth.socket.send(b'Connection: Closed\r\n')
         sockth.socket.send(b'\r\n')
         sockth.socket.send(content)
+
+        return True
 
 class WebServiceEndpoint(RouteEndpoint):
     def __init__(self, route, callback):
@@ -513,6 +535,7 @@ class ServerSentEventEndpoint(RouteEndpoint):
         sockth.socket.send(b'Content-Type: text/event-stream\r\n')
         sockth.socket.send(b'Cache-Control: no-cache\r\n')
         sockth.socket.send(b'\r\n')
+
         self.OnReady(sockth)
 
 class WebSocketEndpoint(RouteEndpoint):
@@ -647,11 +670,11 @@ class PythonWebCore(Thread):
 
             while self.listening:
                 try:
-                    sockclint, addr = socksrvr.accept()
+                    sockclient, addr = socksrvr.accept()
                     
                     if self.cert:
                         try:
-                            sockclint = ssl.wrap_socket(sockclint, certfile = self.cert, server_side = True)
+                            sockclient = ssl.wrap_socket(sockclient, certfile = self.cert, server_side = True)
 
                         except Exception as ex:
                             logging.critical(ex)
@@ -665,7 +688,7 @@ class PythonWebCore(Thread):
                                 continue
 
                     logging.debug('connect ' + ':'.join(str(x) for x in addr))
-                    SocketHanlderThread(sockclint, addr, self).start()
+                    SocketHanlderThread(sockclient, addr, self).start()
     
                 except Exception as ex:
                     logging.critical(ex)
@@ -691,7 +714,6 @@ if __name__ == '__main__':
 
     #
     # # ws.OnReady = TestCustomOnReady
-    
 
     from os import path as ospath
     ep_static = WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents')
@@ -699,7 +721,7 @@ if __name__ == '__main__':
     ep_serverevent = ServerSentEventEndpoint('/TestSSE')
     ep_websocket = WebSocketEndpoint('/TestSocket', TestSocket)
     ep_multiroute = MultiRouteEndpoint([ep_static, ep_webservice, ep_serverevent, ep_websocket])
-    ep_authenticate = WWWAuthenticateBasicEndpoint(ep_multiroute, "admin", "admin")
+    ep_authenticate = WWWAuthenticateBasicEndpoint("admin", "admin", [ep_multiroute])
     ep_exception = ExceptionEndpoint()
     
     pwc.RegisterEndpoint(ep_authenticate)
