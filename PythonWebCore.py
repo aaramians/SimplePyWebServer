@@ -33,6 +33,7 @@ import json
 from threading import Thread
 import string
 import random
+import os
 
 if sys.version_info[0] < 3:
     raise Exception("Must be using Python 3")
@@ -103,8 +104,6 @@ __responses = {
     505: ('HTTP Version Not Supported', 'Cannot fulfill request.'),
 }
 
-
-
 # every connection is handled with a thread, may not scale well, but very easy to deal with
 class SocketHanlderThread(Thread):
     def __init__(self, socket, address, server):
@@ -114,7 +113,6 @@ class SocketHanlderThread(Thread):
         self.path = None
         self.server = server
         self.daemon = True
-        self.exception = None
 
     def parse_ContentDisposition(self, header):
         extract = {}
@@ -170,6 +168,9 @@ class SocketHanlderThread(Thread):
             # just about enough 4KiB to understand the request 
             request = self.socket.recv(4 * 1024)
 
+            if len(request) < 5:
+                return
+
             # primary request with headers extraction
             lend = 0
             lbegin = 0
@@ -185,6 +186,10 @@ class SocketHanlderThread(Thread):
                     # todo prper header extraction
                     if header.startswith('Content-Length:'):
                         self.headers["Content-Length"] = int(header.split()[1])
+
+                    elif header.startswith('Range: bytes'):
+                            range = header[len('Range: bytes='):]
+                            self.headers["Range-Start"], self.headers["Range-End"] = range.split('-')
 
                     elif header.startswith('Content-Type:'):
                         for t in header.split():
@@ -313,31 +318,45 @@ class SocketHanlderThread(Thread):
                 elif len(words) == 2:
                     self.command, self.route = words
 
-            self.server.endpoints[0].Respond(self)
-
+            self.server.endpoint.Respond(self)
+        
+        except BrokenPipeError as ex:
+            logging.error(ex)
+        
         except Exception as ex:
             logging.critical(ex)
-        
+
+            if self.server.exceptionEndpoint:
+                self.server.ExceptionEndpoint.Respond(self)
+
         finally:
             self.socket.close()
 
 class Endpoint(object):
     def __init__(self):
-        self.Exception = None
         self.Owner = None
 
     def randomString(self, stringLength=64):
         """Generate a random string of fixed length """
         letters = string.ascii_lowercase + string.digits
         return ''.join(random.choice(letters) for i in range(stringLength))
-        
+    
+    def CanRespond(self, sockth):
+        return True
+
     def Respond(self, sockth):
         return True
+
 
 class RouteEndpoint(Endpoint):
     def __init__(self, route):
         super().__init__()
         self.route = route
+
+    def CanRespond(self, sockth):
+        t = super().CanRespond(sockth)
+        t &= sockth.route == self.route
+        return t
 
     def Respond(self, sockth):
         return super().Respond(sockth)
@@ -352,91 +371,126 @@ class MultiRouteEndpoint(Endpoint):
             e.Owner = self
 
     def Respond(self, sockth):
-        super().Respond(sockth)
-
-        # grabing the first endpoint as default endpoint
-        endpoint = self.endpoints[0]
+        t = super().Respond(sockth)
 
         for e in self.endpoints:
-            if sockth.route == e.route:
-                endpoint = e
+            if e.CanRespond(sockth):
+                e.Respond(sockth)
                 break
-
-        endpoint.Respond(sockth)
 
         return True
 
 class WWWAuthenticateBasicEndpoint(Endpoint):
-    def __init__(self, username, password , endpoints):
+    def __init__(self, username, password , passEndpoint):
         super().__init__()
         self.username = username
         self.password = password
-        self.endpoints = endpoints
-        self.sessionids = []
-
-        for e in self.endpoints:
-            e.Owner = self
+        self.sessions = {}
+        self.passEndpoint = passEndpoint 
+        self.passEndpoint.Owner = self
 
     def Authenticate(self, sockth):
-        if sockth.sessionid in self.sessionids:
-            return True
-
-        if 'Authorization' in sockth.headers:
-            token = base64.b64decode(sockth.headers['Authorization']).decode("ascii")
-            
-            if token == self.username + ':' +  self.password:
-                self.sessionids.append(sockth.sessionid)
-                return True
+        if self.sessions[sockth.sessionid] == False:
+            if 'Authorization' in sockth.headers:
+                token = base64.b64decode(sockth.headers['Authorization']).decode("ascii")
                 
-        return False
+                if token == self.username + ':' +  self.password:
+                    self.sessions[sockth.sessionid] = True
+                
+        return self.sessions[sockth.sessionid]
     
     def Respond(self, sockth):
-        super().Respond(sockth)
+        t = super().Respond(sockth)
+
+        if sockth.sessionid == None or sockth.sessionid != None and sockth.sessionid not in self.sessions:
+            sockth.sessionid = self.randomString()
+            logging.debug('new session ' + sockth.sessionid)
+            self.sessions[sockth.sessionid] = False
+
+            sockth.socket.send(b'HTTP/1.1 401 Unauthorized\r\n')
+            sockth.socket.send(b'WWW-Authenticate: Basic realm="User Visible Realm", charset="UTF-8"\r\n')
+            sockth.socket.send(b'Set-Cookie: sessionid=' + bytes(str(sockth.sessionid), "ascii")  + b'\r\n')
+            sockth.socket.send(b'Connection: Closed\r\n')
+            sockth.socket.send(b'\r\n')
+            sockth.socket.send(b'')
+            return False
 
         if self.Authenticate(sockth):
-            self.endpoints[0].Respond(sockth)
+            self.passEndpoint.Respond(sockth)
         else:
-            if len(self.endpoints) == 2:
-                self.endpoints[1].Respond(sockth)
-            else:
-                sockth.socket.send(b'HTTP/1.1 401 Unauthorized\r\n')
-                sockth.socket.send(b'WWW-Authenticate: Basic realm="User Visible Realm", charset="UTF-8"\r\n')
+            # if self.failEndpoint:
+            #     self.failEndpoint.Respond(sockth)
+            #     self.sessions.pop(sockth.sessionid)
+            #     sockth.socket.send(b'Set-Cookie: sessionid=deleted; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT\r\n')
+            # else:
+            sockth.socket.send(b'HTTP/1.1 401 Unauthorized\r\n')
+            sockth.socket.send(b'WWW-Authenticate: Basic realm="User Visible Realm", charset="UTF-8"\r\n')
+            sockth.socket.send(b'Connection: Closed\r\n')
+            sockth.socket.send(b'\r\n')
+            sockth.socket.send(b'Login failed!')
 
         return True
 
-class ExceptionEndpoint(Endpoint):
-    def __init__(self):
+class StaticEndpoint(Endpoint):
+    def __init__(self, content):
         super().__init__()
-    
+        self.content = content
+
     def Respond(self, sockth):
         super().Respond(sockth)
+        sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
+        sockth.socket.send(b'Content-Length: ' + bytes(str(len(self.content)), "ascii") + b'\r\n')
+        sockth.socket.send(b'Connection: Closed\r\n')
+        sockth.socket.send(b'\r\n')
+        sockth.socket.send(bytes(self.content, "ascii"))
 
-        if sockth.exception != None:
-            try:
-                raise sockth.exception
-            except FileNotFoundError:
-                sockth.socket.send(b'HTTP/1.1 404 Not Found\r\n')
 
-class WebStaticEndpoint(RouteEndpoint):
+class StaticFileEndpoint(Endpoint):
     def __init__(self, path, cache = False):
-        super().__init__('')
+        super().__init__()
         self.path = path
 
+    def CanRespond(self, sockth):
+        t = super().CanRespond(sockth)
+        t &= os.path.exists(self.path + sockth.route)
+        return t
+
     def Respond(self, sockth):
+        lenFile = 0
+        partial = False
+        
+        start = 0
+        end = 0
+        lenBuff = 16*1024*1024
+
+        if 'Range-Start' in sockth.headers:
+            start = int(sockth.headers['Range-Start'])
+ 
+        if 'Range-End' in sockth.headers:
+            if sockth.headers['Range-End'] != '':
+                end = int(sockth.headers['Range-End'])
+                lenBuff = end - start + 1
+
         try:
-            with open(self.path + sockth.route, 'rb') as f:
-                content = f.read(16*1024*1024)
-                contentlen = len(content)
+            lenFile = os.path.getsize(self.path + sockth.route)
+
+            # todo implement larger file streaming
+            if lenFile > lenBuff:
+                partial = True
                 
+            with open(self.path + sockth.route, 'rb') as f:
+                f.seek(start)
+                content = f.read(lenBuff)
+                lenBuff = len(content)
+
+                if partial and end == 0:
+                    end = start + lenBuff - 1
+
         except FileNotFoundError as ex:
             logging.critical(ex)
             sockth.exception = ex
             sockth.socket.send(b'HTTP/1.1 404 Not Found\r\n')
             return False
-
-        # todo implement larger file streaming
-        if contentlen == 16*1024*1024:
-            raise NotImplementedError
 
         mime = 'application/octet-stream'
         
@@ -454,14 +508,20 @@ class WebStaticEndpoint(RouteEndpoint):
         elif sockth.route.endswith(".mp4"):
             mime = 'video/mp4'
 
-        sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
-        sockth.socket.send(b'Content-Type: ' + bytes(mime, "ascii") + b'\r\n')
-        sockth.socket.send(b'Content-Length: ' + bytes(str(contentlen), "ascii") + b'\r\n')
+        if partial:
+            sockth.socket.send(b'HTTP/1.1 206 Partial Content\r\n')
+        else:
+           sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
         
-        if sockth.sessionid == None:
-            sockth.sessionid = self.randomString()
-            logging.debug('new session ' + sockth.sessionid)
-            sockth.socket.send(b'Set-Cookie: sessionid=' + bytes(str(sockth.sessionid), "ascii")  + b'\r\n')
+        if partial:
+            sockth.socket.send(b'Accept-Ranges: bytes\r\n')
+        
+        sockth.socket.send(b'Content-Length: ' + bytes(str(lenBuff), "ascii") + b'\r\n')
+        sockth.socket.send(b'Content-Type: ' + bytes(mime, "ascii") + b'\r\n')
+        
+        if partial:
+            sockth.socket.send(b'Content-Range: bytes ' + bytes(str(start), "ascii") +  b'-' + bytes(str(end), "ascii") + b'/' + bytes(str(lenFile), "ascii") + b'\r\n')
+
         
         sockth.socket.send(b'Connection: Closed\r\n')
         sockth.socket.send(b'\r\n')
@@ -478,13 +538,13 @@ class WebServiceEndpoint(RouteEndpoint):
         # urlparse.parse_qs("Name1=Value1;Name2=Value2;Name3=Value3")
         method = self.callback
         content = method(**sockth.data)
-        contentlen = bytes(str(len(content)), "ascii")
+        lenContent = bytes(str(len(content)), "ascii")
         sockth.socket.send(b'HTTP/1.1 200 OK\r\n')
-        sockth.socket.send(b'Content-Length: ' + contentlen + b'\r\n')
+        sockth.socket.send(b'Content-Length: ' + lenContent + b'\r\n')
         sockth.socket.send(b'Connection: Closed\r\n')
         sockth.socket.send(b'\r\n')
         
-        if content != None:
+        if content:
             sockth.socket.send(content)
     
     def Respond(self, sockth):
@@ -611,7 +671,7 @@ class WebSocketEndpoint(RouteEndpoint):
     def OnReady(self, sockth):
         while 1:
             response = self.Receive(sockth)
-            if response != None:
+            if response:
                 self.Send(sockth, response)
 
     def Respond(self, sockth):
@@ -635,17 +695,17 @@ class WebSocketEndpoint(RouteEndpoint):
 class PythonWebCore(Thread):
     def __init__(self, hostname, port = 80, cert = None):
         Thread.__init__(self)
-        self.endpoints = []
-        self.defaultendpoint = None
+        self.endpoint = None
         self.hostname = hostname
         self.port = port
         self.daemon = True
         self.listening = False
         self.cert = cert
+        self.exceptionEndpoint = None
 
     def RegisterEndpoint(self, endpoint):
         logging.debug('registering endpoint ' + type(endpoint).__name__)
-        self.endpoints.append(endpoint)
+        self.endpoint = endpoint
         return endpoint
 
     def stop(self):
@@ -716,13 +776,13 @@ if __name__ == '__main__':
     # # ws.OnReady = TestCustomOnReady
 
     from os import path as ospath
-    ep_static = WebStaticEndpoint(ospath.dirname(ospath.abspath(__file__))+ '/contents')
+    ep_staticfile = StaticFileEndpoint(ospath.dirname(ospath.abspath(__file__)) + '/contents')
+    ep_content = StaticEndpoint('Login Failed!')
     ep_webservice = WebServiceEndpoint('/TestAjax', TestAjax)
     ep_serverevent = ServerSentEventEndpoint('/TestSSE')
     ep_websocket = WebSocketEndpoint('/TestSocket', TestSocket)
-    ep_multiroute = MultiRouteEndpoint([ep_static, ep_webservice, ep_serverevent, ep_websocket])
-    ep_authenticate = WWWAuthenticateBasicEndpoint("admin", "admin", [ep_multiroute])
-    ep_exception = ExceptionEndpoint()
+    ep_multiroute = MultiRouteEndpoint([ep_webservice, ep_serverevent, ep_websocket, ep_staticfile])
+    ep_authenticate = WWWAuthenticateBasicEndpoint("admin", "admin", ep_multiroute)
     
     pwc.RegisterEndpoint(ep_authenticate)
 
@@ -735,6 +795,11 @@ if __name__ == '__main__':
         pwc.join()
         
     except KeyboardInterrupt as ex:
+        logging.critical(ex)
+        pwc.stop()
+        pwc.join()
+
+    except Exception as ex:
         logging.critical(ex)
         pwc.stop()
         pwc.join()
